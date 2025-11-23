@@ -1,0 +1,204 @@
+---
+title: "Mobile, AL Census Map"
+output: html_document
+date: "2025-10-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+CENSUS_API_KEY='b7d19b24cd5696e50740fa5a97f4a58429c75455'
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Install packages as needed
+# install.packages(c("tidycensus", "tidyverse", "mapview", "mapgl", "quarto"))
+# Load necessary libraries
+#install.packages("tidycensus")
+#install.packages("tidyverse")
+#install.packages("mapview")
+#install.packages("mapgl")
+#install.packages("sf")
+#install.packages("viridis")
+library(tidycensus)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(viridis)
+library(mapview)
+library(scales)
+library(ggplot2)
+library(mapgl)
+library(tidyverse)
+library(tidyr)
+```
+
+```{r, messages=FALSE, warning=FALSE}
+al_counties = get_acs(
+  geography = "county",
+  variables = c(black = "B02001_003", # Black/African American population alone
+                total = "B01001_001" # Total population
+  ),
+  state = "AL",
+  year = 2023,
+  geometry = T,
+  output = "wide"
+)
+ # Add county FIPS code by extracting first 5 digits of GEOID
+al_counties <- al_counties %>%
+  mutate(county_fips = substr(GEOID, 1, 5)) %>% 
+  relocate(GEOID, county_fips)
+
+#View(al_counties)
+```
+
+```{r, messages=FALSE, warning=FALSE}
+# county demographic data
+head(al_counties) %>% 
+  select(GEOID, county_fips, NAME, blackE, totalE)
+# highest alabama county black pops
+al_counties %>% 
+  arrange(desc(blackE)) %>% 
+  head(n=10)
+#lowest alabama county black pops
+al_counties %>% 
+  mutate(prop_black = blackE / totalE) %>% 
+  relocate(GEOID, prop_black) %>% 
+  arrange(-desc(prop_black))
+```
+
+
+```{r, messages=FALSE, warning=FALSE}
+mobile_tracts <- get_acs( #gather data for mobile, county
+  geography = "tract",
+  variables = c(
+    black = "B02001_003",      # Black or African American alone
+    total = "B01001_001"       # Total population
+  ),
+  state = "AL",
+  county = "Mobile",
+  year = 2023,
+  geometry = TRUE,
+  output = "wide"
+)
+
+mobile_tracts %>% 
+  head()
+```
+
+```{r, messages=FALSE, warning=FALSE}
+ggplot(mobile_tracts) + #mapping mobile county
+  geom_sf(aes(fill = blackE), color = NA) +
+  scale_fill_viridis_c(option = "magma", na.value = "grey50", labels = comma) +
+  labs(title = "Estimated Black Population by Census Tract in Mobile, AL (2023)",
+       fill = "Population") +
+  theme_minimal()
+```
+
+```{r, messages=FALSE, warning=FALSE}
+mapview(
+  mobile_tracts,
+  zcol = "blackE"
+#interactive mobile al map
+)
+```
+
+```{r, messages=FALSE, warning=FALSE}
+#nonblack pop estiamte
+mobile_tracts <- mobile_tracts %>% 
+  mutate(nonblackE = totalE - blackE) %>% 
+  select(GEOID, blackE, nonblackE, totalE)
+```
+
+```{r, messages=FALSE, warning=FALSE}
+#nonblack pop map
+ggplot(mobile_tracts) +
+  geom_sf(aes(fill = nonblackE)) +
+  scale_fill_viridis_c(option = "magma", 
+                       na.value = "grey50",
+                       labels = comma) +
+  labs(title = "Estimated Non-Black Population by Census Tract in Mobile, AL (2023)",
+       fill = "Population") +
+  theme_minimal()
+```
+
+```{r, messages=FALSE, warning=FALSE}
+#index of dissimilarity 
+#proportion of all Black people in Mobile tracts
+mobile_tracts <- mobile_tracts %>% 
+  mutate(proportion_black = blackE / totalE) %>%
+  mutate(proportion_non_black = 1 - proportion_black)
+#top 10 tracts with highest proportion of Black individuals 
+mobile_tracts %>%
+  arrange(desc(proportion_black)) %>% 
+  select(GEOID, proportion_black, proportion_non_black) %>% 
+  head(n = 10)
+#remove geometry ft before summarazing
+mobile_tracts %>%
+  st_set_geometry(NULL) %>%   # Remove geometry to treat as normal data.frame
+  summarise(
+    total_tracts = n(),
+    tracts_above_threshold = sum(proportion_black >= 0.60, na.rm = TRUE),
+    proportion_above_threshold = mean(proportion_black >= 0.60, na.rm = TRUE)
+  )
+# calculate D for mobile county
+mobile_total_black <- sum(mobile_tracts$blackE, na.rm = TRUE)
+mobile_total_nonblack <- sum(mobile_tracts$nonblackE, na.rm = TRUE)
+
+dissimilarity_mobile <- 0.5 * sum(abs(
+  (mobile_tracts$blackE / mobile_total_black) - 
+  (mobile_tracts$nonblackE / mobile_total_nonblack)
+), na.rm = TRUE)
+dissimilarity_mobile
+
+```
+
+```{r, messages=FALSE, warning=FALSE}
+#visualize potential dividing wall
+ggplot(mobile_tracts) +
+  geom_sf(aes(fill = proportion_black), color = "white") +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "Proportion of Black Residents by Census Tract in Mobile, AL",
+       fill = "Proportion Black") +
+  theme_minimal()
+#is there a dividing wall?
+mobile_tracts <- mobile_tracts %>%
+  mutate(majority_black = proportion_black > 0.5)
+#join geometries by group
+# Union geometries by group
+mobile_union_black <- mobile_tracts %>%
+  filter(majority_black) %>%
+  summarise(geometry = st_union(geometry))
+
+mobile_union_nonblack <- mobile_tracts %>%
+  filter(!majority_black) %>%
+  summarise(geometry = st_union(geometry))
+#calculate boundary difference between groups shared border
+mobile_boundary_line = 
+  st_intersection(st_boundary(mobile_union_black), st_boundary(mobile_union_nonblack))
+#plot base polygons for dividing wall
+ggplot() +
+  geom_sf(data = mobile_tracts, aes(fill = majority_black), 
+          color = "grey40", 
+          alpha = 0.5) +
+  geom_sf(data = mobile_boundary_line, 
+          color = "red", 
+          size = 1) +
+  labs(title = "Dividing Racial Demgoraphic 
+  Walls Between Majority Black and Non-Black Areas 
+       in Mobile County, AL") +
+  theme_minimal()
+```
+
+```{r, messages=FALSE, warning=FALSE}
+mapview(
+  mobile_tracts,
+  zcol = "blackE"
+)
+```
+
+
+
+
+
+
+
